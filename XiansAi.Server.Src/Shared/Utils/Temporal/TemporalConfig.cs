@@ -9,7 +9,11 @@ public class TemporalConfig
 
     public string? FlowServerNamespace { get; set; }
 
-    // optionally read from local file system
+    // Certificate configuration (base64 encoded)
     public string? CertificateBase64 { get; set; }
     public string? PrivateKeyBase64 { get; set; }
+    public string? ServerRootCACertBase64 { get; set; }  // CA certificate for server validation
+    
+    // TLS server name for SNI (Server Name Indication)
+    public string? ServerName { get; set; }
 }

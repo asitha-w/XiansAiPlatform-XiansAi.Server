@@ -1,5 +1,7 @@
 using Temporalio.Client;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Shared.Utils.Temporal;
 
@@ -61,13 +63,11 @@ public class TemporalClientService : ITemporalClientService, IDisposable, IAsync
                 Namespace = config.FlowServerNamespace!,
             };
             
-            if (config.CertificateBase64 != null && config.PrivateKeyBase64 != null) 
+            // Configure TLS if certificates are available
+            var tlsOptions = GetTlsOptions(config);
+            if (tlsOptions != null)
             {
-                options.Tls = new TlsOptions()
-                {
-                    ClientCert = GetCertificate(config),
-                    ClientPrivateKey = GetPrivateKey(config),
-                };
+                options.Tls = tlsOptions;
             }
             
             _logger.LogInformation("Connecting to temporal server for tenant {TenantId}: {Url}, namespace: {Namespace}", 
@@ -111,6 +111,120 @@ public class TemporalClientService : ITemporalClientService, IDisposable, IAsync
         return temporalConfig;
     }
 
+    /// <summary>
+    /// Gets TLS options for Temporal connection.
+    /// Supports two approaches:
+    /// 1. Direct configuration: Temporal__CertificateBase64, Temporal__PrivateKeyBase64
+    /// 2. Centralized certificates: Certificates__AppServerPfxBase64, Certificates__ServerRootCACertBase64
+    /// </summary>
+    private TlsOptions? GetTlsOptions(TemporalConfig config)
+    {
+        // Approach 1: Direct configuration (backward compatible)
+        if (config.CertificateBase64 != null && config.PrivateKeyBase64 != null)
+        {
+            _logger.LogInformation("Using direct Temporal certificate configuration");
+            return new TlsOptions()
+            {
+                ClientCert = GetCertificate(config),
+                ClientPrivateKey = GetPrivateKey(config),
+                ServerRootCACert = GetServerRootCACert(config),
+                Domain = config.ServerName,
+            };
+        }
+        
+        // Approach 2: Centralized certificates (fallback)
+        var certSection = _configuration.GetSection("Certificates");
+        var pfxBase64 = certSection["AppServerPfxBase64"];
+        var pfxPassword = certSection["AppServerCertPassword"];
+        var caBase64 = certSection["ServerRootCACertBase64"];
+        
+        // If centralized PFX is available, use it
+        if (!string.IsNullOrEmpty(pfxBase64) && !string.IsNullOrEmpty(caBase64))
+        {
+            _logger.LogInformation("Using centralized certificate configuration from Certificates section");
+            
+            try
+            {
+                // Extract certificate and private key from PFX
+                var (clientCert, clientKey) = ExtractCertAndKeyFromPfx(pfxBase64, pfxPassword);
+                
+                return new TlsOptions()
+                {
+                    ClientCert = clientCert,
+                    ClientPrivateKey = clientKey,
+                    ServerRootCACert = Convert.FromBase64String(caBase64),
+                    Domain = config.ServerName,
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to extract certificates from centralized PFX bundle");
+                throw;
+            }
+        }
+        
+        // No certificates configured - plain connection
+        _logger.LogInformation("No TLS certificates configured, using plain connection");
+        return null;
+    }
+    
+    /// <summary>
+    /// Extracts certificate and private key from a PFX (PKCS#12) bundle.
+    /// </summary>
+    private (byte[] certificate, byte[] privateKey) ExtractCertAndKeyFromPfx(string pfxBase64, string? password)
+    {
+        try
+        {
+            var pfxBytes = Convert.FromBase64String(pfxBase64);
+            
+            // Load the PFX certificate using the modern API
+            using var cert = string.IsNullOrEmpty(password)
+                ? X509CertificateLoader.LoadPkcs12(pfxBytes, null)
+                : X509CertificateLoader.LoadPkcs12(pfxBytes, password);
+            
+            if (!cert.HasPrivateKey)
+            {
+                throw new InvalidOperationException("PFX certificate does not contain a private key");
+            }
+            
+            // Export certificate (public key) as PEM
+            var certPem = cert.ExportCertificatePem();
+            var certBytes = System.Text.Encoding.UTF8.GetBytes(certPem);
+            
+            // Export private key as PEM
+            var privateKey = cert.GetRSAPrivateKey() ?? cert.GetECDsaPrivateKey() as AsymmetricAlgorithm;
+            if (privateKey == null)
+            {
+                throw new InvalidOperationException("Unable to extract private key from PFX certificate");
+            }
+            
+            string keyPem;
+            if (privateKey is RSA rsa)
+            {
+                keyPem = rsa.ExportRSAPrivateKeyPem();
+            }
+            else if (privateKey is ECDsa ecdsa)
+            {
+                keyPem = ecdsa.ExportECPrivateKeyPem();
+            }
+            else
+            {
+                throw new InvalidOperationException($"Unsupported private key type: {privateKey.GetType().Name}");
+            }
+            
+            var keyBytes = System.Text.Encoding.UTF8.GetBytes(keyPem);
+            
+            _logger.LogDebug("Successfully extracted certificate and private key from PFX");
+            
+            return (certBytes, keyBytes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to extract certificate and key from PFX");
+            throw new InvalidOperationException("Failed to extract certificate and key from PFX bundle", ex);
+        }
+    }
+
     private byte[]? GetCertificate(TemporalConfig config)
     {
         if (config.CertificateBase64 == null) 
@@ -127,6 +241,15 @@ public class TemporalClientService : ITemporalClientService, IDisposable, IAsync
             return null;
         }
         return Convert.FromBase64String(config.PrivateKeyBase64);
+    }
+
+    private byte[]? GetServerRootCACert(TemporalConfig config)
+    {
+        if (config.ServerRootCACertBase64 == null) 
+        {
+            return null;
+        }
+        return Convert.FromBase64String(config.ServerRootCACertBase64);
     }
 
     private void ThrowIfDisposed()
