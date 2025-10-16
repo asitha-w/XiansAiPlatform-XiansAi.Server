@@ -113,41 +113,22 @@ public class TemporalClientService : ITemporalClientService, IDisposable, IAsync
 
     /// <summary>
     /// Gets TLS options for Temporal connection.
-    /// Supports two approaches:
-    /// 1. Direct configuration: Temporal__CertificateBase64, Temporal__PrivateKeyBase64
-    /// 2. Centralized certificates: Certificates__AppServerPfxBase64, Certificates__ServerRootCACertBase64
+    /// Uses centralized certificates: Certificates__AppServerPfxBase64, Certificates__ServerRootCACertBase64
     /// </summary>
     private TlsOptions? GetTlsOptions(TemporalConfig config)
     {
-        // Approach 1: Direct configuration (backward compatible)
-        if (config.CertificateBase64 != null && config.PrivateKeyBase64 != null)
-        {
-            _logger.LogInformation("Using direct Temporal certificate configuration");
-            return new TlsOptions()
-            {
-                ClientCert = GetCertificate(config),
-                ClientPrivateKey = GetPrivateKey(config),
-                ServerRootCACert = GetServerRootCACert(config),
-                Domain = config.ServerName,
-            };
-        }
-        
-        // Approach 2: Centralized certificates (fallback)
+        // Use centralized certificates (preferred approach for server's own connection)
         var certSection = _configuration.GetSection("Certificates");
         var pfxBase64 = certSection["AppServerPfxBase64"];
         var pfxPassword = certSection["AppServerCertPassword"];
         var caBase64 = certSection["ServerRootCACertBase64"];
-        
-        // If centralized PFX is available, use it
+
         if (!string.IsNullOrEmpty(pfxBase64) && !string.IsNullOrEmpty(caBase64))
         {
             _logger.LogInformation("Using centralized certificate configuration from Certificates section");
-            
             try
             {
-                // Extract certificate and private key from PFX
                 var (clientCert, clientKey) = ExtractCertAndKeyFromPfx(pfxBase64, pfxPassword);
-                
                 return new TlsOptions()
                 {
                     ClientCert = clientCert,
@@ -162,8 +143,7 @@ public class TemporalClientService : ITemporalClientService, IDisposable, IAsync
                 throw;
             }
         }
-        
-        // No certificates configured - plain connection
+
         _logger.LogInformation("No TLS certificates configured, using plain connection");
         return null;
     }
@@ -225,32 +205,6 @@ public class TemporalClientService : ITemporalClientService, IDisposable, IAsync
         }
     }
 
-    private byte[]? GetCertificate(TemporalConfig config)
-    {
-        if (config.CertificateBase64 == null) 
-        {
-            return null;
-        }
-        return Convert.FromBase64String(config.CertificateBase64);
-    }
-
-    private byte[]? GetPrivateKey(TemporalConfig config)
-    {
-        if (config.PrivateKeyBase64 == null) 
-        {
-            return null;
-        }
-        return Convert.FromBase64String(config.PrivateKeyBase64);
-    }
-
-    private byte[]? GetServerRootCACert(TemporalConfig config)
-    {
-        if (config.ServerRootCACertBase64 == null) 
-        {
-            return null;
-        }
-        return Convert.FromBase64String(config.ServerRootCACertBase64);
-    }
 
     private void ThrowIfDisposed()
     {

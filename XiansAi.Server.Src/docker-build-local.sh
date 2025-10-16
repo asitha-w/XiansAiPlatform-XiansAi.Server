@@ -7,7 +7,7 @@ set -e  # Exit on any error
 
 # Default values
 IMAGE_NAME="99xio/xiansai-server"
-DEFAULT_TAG="local"
+DEFAULT_TAG="mtls05"
 DOCKERFILE="./Dockerfile.production"
 
 # Colors for output

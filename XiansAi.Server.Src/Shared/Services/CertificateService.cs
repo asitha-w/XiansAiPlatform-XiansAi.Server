@@ -13,6 +13,8 @@ public class FlowServerSettings
     public required string FlowServerNamespace { get; set; }
     public string? FlowServerCertBase64 { get; set; }
     public string? FlowServerPrivateKeyBase64 { get; set; }
+    public string? FlowServerRootCACertBase64 { get; set; }  // CA certificate for server validation
+    public string? FlowServerDomain { get; set; }  // TLS domain for SNI
     public required string ApiKey { get; set; }
     public required string? ProviderName { get; set; }
     public required string ModelName { get; set; }
@@ -27,19 +29,22 @@ public class CertificateService
     private readonly CertificateGenerator _certificateGenerator;
     private readonly ICertificateRepository _certificateRepository;
     private readonly ILlmService _llmService;
+    private readonly IConfiguration _configuration;
 
     public CertificateService(
         ILogger<CertificateService> logger,
         ITenantContext tenantContext,
         CertificateGenerator certificateGenerator,
         ICertificateRepository certificateRepository,
-        ILlmService llmService)
+        ILlmService llmService,
+        IConfiguration configuration)
     {
         _logger = logger;
         _tenantContext = tenantContext;
         _certificateGenerator = certificateGenerator;
         _certificateRepository = certificateRepository;
         _llmService = llmService;
+        _configuration = configuration;
     }
 
     public FlowServerSettings GetFlowServerSettings()
@@ -51,6 +56,8 @@ public class CertificateService
             FlowServerNamespace = _tenantContext.GetTemporalConfig().FlowServerNamespace ?? throw new Exception($"FlowServerNamespace not found for Tenant:{_tenantContext.TenantId}"),
             FlowServerCertBase64 = GetFlowServerCertBase64(),
             FlowServerPrivateKeyBase64 = GetFlowServerPrivateKeyBase64(),
+            FlowServerRootCACertBase64 = GetFlowServerRootCACertBase64(),
+            FlowServerDomain = GetFlowServerDomain(),
             ApiKey = _llmService.GetApiKey(),
             ProviderName = _llmService.GetLlmProvider(),
             ModelName = _llmService.GetModel(),
@@ -78,6 +85,35 @@ public class CertificateService
             return null;
         }
         return temporalConfig.PrivateKeyBase64;
+    }
+
+    public string? GetFlowServerRootCACertBase64()
+    {
+        var temporalConfig = _tenantContext.GetTemporalConfig();
+        
+        // Approach 1: Direct configuration (tenant-specific)
+        if (temporalConfig.ServerRootCACertBase64 != null)
+        {
+            return temporalConfig.ServerRootCACertBase64;
+        }
+        
+        // Approach 2: Centralized certificates (fallback)
+        var certSection = _configuration.GetSection("Certificates");
+        var caBase64 = certSection["ServerRootCACertBase64"];
+        
+        if (!string.IsNullOrEmpty(caBase64))
+        {
+            _logger.LogInformation("Using centralized CA certificate configuration from Certificates section");
+            return caBase64;
+        }
+        
+        return null;
+    }
+
+    public string? GetFlowServerDomain()
+    {
+        var temporalConfig = _tenantContext.GetTemporalConfig();
+        return temporalConfig.ServerName;
     }
 
     private async Task<X509Certificate2> GenerateAndStoreCertificate(string name, string userId, bool revokePrevious)
